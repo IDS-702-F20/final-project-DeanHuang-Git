@@ -1,0 +1,229 @@
+---
+title: "Statistical Inference on Lyft Fare Price"
+author: "Dean Huang"
+date: "11/17/2020"
+output:
+  pdf_document: default
+---
+
+```{r include=FALSE}
+library(tidyr)
+library(dplyr)
+library(knitr)
+library(ggplot2)
+library(skimr)
+library(xtable)
+library(rms) #for VIF
+library(MASS)
+library(pander)
+library(arm)
+library(pROC)
+library(e1071)
+library(caret)
+require(gridExtra)
+library(pander)
+library(xtable)
+library(kableExtra)
+ ride <- read.table ("rideshare_kaggle.csv", header=T, sep=",")
+  #Focus on Lyft
+  ride<-ride[which(ride$cab_type=='Lyft'),]
+  #Only contain the variables you are interested in looking
+  r1 <- ride[, names(ride) %in% c("hour","source","destination","name","price","distance", "surge_multiplier", "temperature", 
+                                   "apparentTemperature","precipIntensity","pressure","windSpeed", "windGust", "icon","windSpeed", "visibility","windBearing","long_summary")]
+  remove(ride)
+  
+  r1$icon<-factor(r1$icon)
+  r1$source<-factor(r1$source)
+  r1$destination <- relevel(factor(r1$destination), ref = 12)
+  r1$name<-factor(r1$name)
+  r1$long_summary<-factor(r1$long_summary)
+  #Remove surge effects
+  #r1$price2<-r1$price/r1$surge_multiplier
+  r1$logprice<-log(r1$price)
+  #Delete rows that have null values
+  r1_final <- na.omit(r1)
+  remove(r1)
+  #Mean_Centered
+  r1_final$distance_cent<-r1_final$distance-mean(r1_final$distance)
+  r1_final$temp_cent<-r1_final$temperature-mean(r1_final$temperature)
+  r1_final$atemp_cent<-r1_final$apparentTemperature-mean(r1_final$apparentTemperature)
+  r1_final$precip_cent<-r1_final$precipIntensity-mean(r1_final$precipIntensity)
+  r1_final$ws_cent<-r1_final$windSpeed-mean(r1_final$windSpeed)
+  r1_final$wg_cent<-r1_final$windGust-mean(r1_final$windGust)
+  r1_final$vis_cent<-r1_final$visibility-mean(r1_final$visibility)
+  r1_final$pre_cent<-r1_final$pressure-mean(r1_final$pressure)
+  r1_final$wb_cent<-r1_final$windBearing-mean(r1_final$windBearing)
+  #Categorize Rush Hours
+  r1_final$rush<-r1_final$hour
+  r1_final$rush[r1_final$rush<=9 & r1_final$rush>=7]<-'Y'
+  r1_final$rush[r1_final$rush<=19 & r1_final$rush>=17]<-'Y'
+  r1_final$rush[r1_final$rush!='Y']<-'N'
+  r1_final$rush<-factor(r1_final$rush)
+  #Categorize Distance
+  # r1_final$dist_cat<-r1_final$distance
+  # r1_final$dist_cat[r1_final$dist_cat<1 & r1_final$dist_cat>=0]<-'0~1'
+  # r1_final$dist_cat[r1_final$dist_cat<2 & r1_final$dist_cat>=1]<-'1~2'
+  # r1_final$dist_cat[r1_final$dist_cat<3 & r1_final$dist_cat>=2]<-'2~3'
+  # r1_final$dist_cat[r1_final$dist_cat<4 & r1_final$dist_cat>=3]<-'3~4'
+  # r1_final$dist_cat[r1_final$dist_cat<7 & r1_final$dist_cat>=4]<-'4~7'
+  # r1_final$dist_cat<-factor(r1_final$dist_cat)
+  #Categorize Surge Multiplier
+  # r1_final$sm<-r1_final$surge_multiplier
+  # r1_final$sm[r1_final$sm<=3 & r1_final$sm>=2.5]<-'2.5 & Above'
+  # r1_final$sm[r1_final$sm==1]<-'1'
+  # r1_final$sm[r1_final$sm==1.25]<-'1.25'
+  # r1_final$sm[r1_final$sm==1.5]<-'1.5'
+  # r1_final$sm[r1_final$sm==1.75]<-'1.75'
+  # r1_final$sm[r1_final$sm==2]<-'2'
+  # r1_final$sm<-factor(r1_final$sm)
+  r1_final$sm<-r1_final$surge_multiplier
+  r1_final$sm[r1_final$sm>1]<-'Above 1'
+  r1_final$sm[r1_final$s==1]<-'Equal to 1'
+  r1_final$sm<-factor(r1_final$sm)
+  #Sampling
+  set.seed(1)
+  sample<-r1_final[sample(nrow(r1_final), 50000, replace = FALSE, prob = NULL),]
+  remove(r1_final)
+
+```
+
+## Summary
+
+The primary objective of this statistical study is to measure the effects of time, temperature, weather, distance of the ride, and surge multiplier on Lyft’s fare price. In other words, the goal is to identify the statistically significant predictors for fare price. The secondary objective is to evaluate the impact of time, temperature, weather, and destination on surge multiplier. The study began with Exploratory Data Analysis (EDA) with the goal of checking the associations of predictor variables and the response variable, and highlight the preliminary concerns based on the results of EDA. Through careful analysis of the results from EDA, transformation of variables is performed and interactions are added to improve the fit of the model. Next, stepwise selection method was implemented to identify the optimal model with the lowest AIC score. To decide whether to drop predictors and/or interaction, F-test was implemented to assess the impact of variables/interactions on the predictive model. Finally, model validation was performed to ensure the final model fulfilled the linear regression assumptions, and there were no multicollinearity and influential points. The outcome of the study shows that time, distance of the ride, and surge multiplier are significant predictors for fare price. In addition, there is enough evidence to conclude that the association between surge multiplier and fare price differs by rush hour and by destination. 
+
+## Introduction
+
+Lyft Inc. is one of the most quintessential ridesharing companies in United States, having 31% share of the US Market in September 2020 [1]. Despite holding one of the largest shares in United States, the ride charging method for this ridesharing giant is a myth. Lyft’s fare includes base fare (the amount passengers pay to start the ride), cost per miles (the cost calculated per kilometer in the city where ride started), cost per minute (the cost calculated per minute in the region where ride started), service fee (a stable fee added to each ride), and other fees (additional fees depending on the starting location and the road condition) [2]. In addition, Lyft’s ridesharing service includes additional multiplier, surge price, when there is high demand of users requesting for rides. Even though the company appeared to be transparent with its ride charging system, the fare calculation method is still obscure due to the dynamic pricing nature of the base fare, cost per kilometer/or mile, and cost per/minute. The first objective of this study is to measure the effects of time, temperature, and weather on the base price. Next, the study will verify the cost per/distance pricing method by quantifying the impact of distance on overall fare price. The secondary objective is to identify the association of time, temperature, destination, and weather on surge multiplier, interactions between related predictors and surge multiplier will be calculated.
+
+## Data
+
+The data set used in this study was provided by Kaggle, with a size of approximately 350.36MB and 693, 071 rows of observations [3]. The data was collected from actual Lyft rides in Boston with date ranged from Nov 26th, 2018 to Dec. 18th, 2018. Even though there were 57 variables, only 11 variables were used to conduct the statistical study: hour, price, ride type, distance, destination, surge multiplier, temperature, apparent temperature, wind speed, wind gust, and icon. The hour variable was categorized into two levels with one level containing hours between 7:00~9:00 and 17:00~19:00, representing rush hours, and the other level containing the rest of the hours, representing non-rush hours. In addition, due to the imbalance of data among different levels, surge multiplier was re-categorized into two levels to represent surge multiplier equal to ‘1x’ and surge multiplier equal to more than ‘1x’. All categorical predictors were factored, and all numeric predictors were mean centered for more meaningful interpretation of the final model. Due to the immense data size, 50,000 observations were randomly sampled after removing observations with missing values.
+
+The first step of EDA was to check the normality of the response variable, price. The histogram showed the overall distribution heavily skewed to the left. After performing logarithmic transformation on price, the distribution appeared to be more normal. Next, scatter plots were constructed to analyze the association of numeric predictors and price. The scatter plot of distance showed positive correlation between distance and price with a positive linear trend. However, the scatter plots of temperature, apparent temperature, wind speed, and wind gust showed no obvious correlation between these predictors and price. To visualize the associations of categorical variables and price, box plots were constructed to compare the overall distribution and median of different categorical levels. Box plots of ride type, destination, and surge multiplier showed difference in distribution and median across different levels. In contrast, box plots of rush hour and icon showed no prominent difference in distribution and median across different levels. 
+
+```{r, results='asis',echo=FALSE,warning=FALSE,message=FALSE}
+p2=ggplot(sample,aes(x=distance_cent, y=logprice)) +
+  geom_point() + #coord_flip()# +
+  scale_fill_brewer(palette="Blues") +
+  labs(title="Distance vs Price",
+       x="Distance",y='Price') + 
+  geom_smooth(col="red3", method="lm") +
+  theme_classic() + theme(legend.position="none")+
+  theme(plot.title = element_text(hjust = 0.5))
+p3=ggplot(sample,aes(x=name, y=logprice, fill=name)) +
+  geom_boxplot() + #coord_flip() +
+  scale_fill_brewer(palette="Reds") +
+  labs(title="Ride Types vs Price",
+       x="Ride Types",y="Price") +
+  theme_classic() + theme(legend.position="none")+ theme(plot.title = element_text(hjust = 0.5))
+p5=ggplot(sample,aes(x=sm, y=logprice, fill=sm)) +
+  geom_boxplot() + #coord_flip() +
+  scale_fill_brewer(palette="Reds") +
+  labs(title="Surge Multiplier vs Price",
+       x="Surge Multiplier",y="Price") +
+  theme_classic() + theme(legend.position="none")+theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(p2, p3, p5, ncol = 2)
+```
+
+The last segment of EDA was to check the potential interactions for surge multiplier, ride type, icon, and distance. Scatter plots of temperature and apparent temperature showed some differences in trends across different levels of surge multiplier. In addition, scatter plots of temperature, apparent temperature, and wind gust showed some differences in trends across different levels of icon.
+
+```{r, results='asis',echo=FALSE,warning=FALSE,message=FALSE}
+
+p2=ggplot(sample,aes(x=temp_cent, y=logprice)) +
+  geom_point() + #coord_flip() +
+  geom_smooth(col='red3', method='lm') +
+  scale_fill_brewer(palette="Blues") + theme_classic() +
+  labs(title="Temperature vs Price by Surge Multiplier",x="Temperature",y="Price") +
+  theme(legend.position="none", axis.title.x =element_text(size=10), axis.title.y=element_text(size=10),
+        axis.text = element_text(size=10), plot.title = element_text(size = rel(0.75), lineheight = .9,family = "Times", face = "bold.italic")) +
+  facet_wrap( ~ sm,ncol=3)
+p3=ggplot(sample,aes(x=atemp_cent, y=logprice)) +
+  geom_point() + #coord_flip() +
+  geom_smooth(col='red3', method='lm') +
+  scale_fill_brewer(palette="Blues") + theme_classic() +
+  labs(title="Apparent Temperature vs Price by Surge Multiplier",x="Apparent Temperature",y="Price") +
+  theme(legend.position="none", axis.title.x =element_text(size=10), axis.title.y=element_text(size=10),
+        axis.text = element_text(size=10), plot.title = element_text(size = rel(0.75), lineheight = .9,family = "Times", face = "bold.italic")) +
+  facet_wrap( ~ sm,ncol=3)
+p4= ggplot(sample,aes(x=temp_cent, y=logprice)) +
+  geom_point() + #coord_flip() +
+  geom_smooth(col='red3', method='lm') +
+  scale_fill_brewer(palette="Blues") + theme_classic() +
+  labs(title="Temperature vs Price by Icon",x="Temperature",y="Price") +
+  theme(legend.position="none", axis.title.x =element_text(size=10), axis.title.y=element_text(size=10),
+        axis.text = element_text(size=10), plot.title = element_text(size = rel(0.75), lineheight = .9,family = "Times", face = "bold.italic")) +
+  facet_wrap( ~ icon,ncol=3)
+p5=ggplot(sample,aes(x=atemp_cent, y=logprice)) +
+  geom_point() + #coord_flip() +
+  geom_smooth(col='red3', method='lm') +
+  scale_fill_brewer(palette="Blues") + theme_classic() +
+  labs(title="Apparent Temperature vs Price by Icon",x="Apparent Temperature",y="Price") +
+  theme(legend.position="none", axis.title.x =element_text(size=10), axis.title.y=element_text(size=10),
+        axis.text = element_text(size=10), plot.title = element_text(size = rel(0.75), lineheight = .9,family = "Times", face = "bold.italic")) +
+  facet_wrap( ~ icon,ncol=3)
+
+grid.arrange(p2, p3, p4, p5, ncol = 2)
+```
+
+## Model 
+Stepwise method was implemented to find the lowest AIC because BIC generally placed a heavier penalty on models with more than 8 variables. The main effects included in the full model were destination, ride type, distance, surge multiplier, icon, temperature, apparent temperature, wind speed, wind gust, and rush hours. Besides the main effects, the final model contained all interactions for surge multiplier, all interactions for icon, all interactions for name, and all interactions for distance. The resulting model of stepwise selection had a total of five fixed effects (ride type, distance, surge multiplier, destination, and rush) and five interactions(ride type and distance, distance and destination, distance and surge multiplier, name and rush, and surge multiplier and rush). To decide whether to drop the potential interactions identified in EDA, F-tests were conducted to compare the p-values of the model after including these interactions. The results of F-tests showed higher p-values after including these interactions; therefore, the final model would not include these interactions. In addition, F-test was also conducted to compare the p-values of the model after including surge multiplier and destination. Since the p-value was lower than 0.05, the interaction was added to the final model. The final model includes the following predictors: ride type, distance, surge multiplier, destination, rush, ride type and distance, distance and destination, distance and surge multiplier, name and rush, and surge multiplier and rush.
+
+Next, multicollinearity test was conducted on the final model to ensure there was no multicollinearity between predictors; since all vif values were below 5, the final model fulfilled the multicollinearity test. To ensure the final model fulfilled the linearity assumptions, residual plots for numeric variables (distance and temperature) were plotted. The residual plots for both numeric predictors appeared to be linear as the plots had no distinct trends (random pattern). However, the residual fitted plot did not appeared to be random because distinct diagonal trends could be observed from the plot. The diagonal trends were most likely caused by the limited range of price as all data were collected from the Boston region. In addition, there are observations with the same price range despite the huge difference in distance traveled (refer to the conclusion section for more explanation). Most points appeared to cluster around the 45-degree line of the Q-Q plot with some points at both ends of tails deviating from the 45-degree line; hence, the model satisfied the normality assumption. In addition, there were no influential points and outliers according to the graph of Cook’s distance. However, there were some leverage points that were not influential.
+
+$$\log y_i = \beta x_{i}+ \epsilon_i; \ \ \epsilon_i \overset{iid}{\sim} N(0, \sigma^2).$$
+Above is the equation of the final model. y_i is the fare price in dollars for observation i, and x_i is the vector containing the corresponding values for ride type, distance, surge multiplier, destination, rush, ride type and distance, distance and destination, distance and surge multiplier, name and rush, and surge multiplier and rush.
+
+```{r, results='asis',echo=FALSE,warning=FALSE,message=FALSE, fig.width=8, fig.height=4}
+model_final <- lm(formula = logprice ~ name + distance_cent + sm + destination + 
+                   rush + name:distance_cent + distance_cent:destination + distance_cent:sm + 
+                   name:rush + sm:rush + sm:destination, data = sample)
+plot(model_final, which=1, col=c('blue4'))
+```
+
+## Conclusion
+According to the summary table of our final model (please refer to the appendix for more information), predictors that are significant in the 95% confidence interval are ride type, distance, surge multiplier, destination, ride type: distance, distance:destination, surge multiplier:rush, and surge multiplier:destination with p-values lower than 0.05. The base values for the categorical variables are ‘Lux’ for ride type, ‘Non-Rush’ for rush, ‘Equal to 1' for surge multiplier, and ‘West End’ for destination. The intercept shows Lyft ride with all categorical variables equal to base values and distance equals to average distance traveled will have a fare price equal to $16.61. As the ride type changes from ‘Lux’ to ‘Shared’, the fare price will decrease by 66% with all other categorical variables equal to the base values and distance equals to average distance traveled. As the traveled distance increases by 1 mile, the fare price will increase by 26% with all categorical variables equal to the base values. As destination changes from ‘West End’ to ‘Haymarket Square’, the fare price will increase by 12% with all other categorical variables equal to the base values and distance equals to average distance traveled. Given the surge multiplier exceed 1 and the ride type is ‘Shared’, as rush changes from ‘Non-Rush’ to ‘Rush', the fare price will decrease by 3% with all other categorical variables equal to the base values and distance equals to average distance traveled. The adjusted R square of 0.95 means 95% of variation in the response variable is explained by the regression fit. The results of the study showed time, distance of the ride, ride type, destination, and surge multiplier as significant predictors for fare price. In addition, there are five statistically significant interactions: ride type and distance, ride type and rush, distance and destination, surge multiplier and rush, and surge multiplier and destination. The relationship between distance and fare price depends on the values of ride type and destination. Likewise, the relationship of surge multiplier and fare price depends on the values of rush and destination.
+
+One limitation of the study is that the amount of fare price does not necessarily reflects the total distance traveled. Since the shared ride option allows passengers to split the fare equally among themselves, passengers who picked the shared ride option ended up paying way less than passengers of other ride types, given the same traveled distance. Therefore, there are observations at the same price range with great difference in the distance traveled. Another potential limitation is the lack of variation within the sample. Since the data was collected from actual Lyft rides in Boston, the statistical inferences made from the model are only relevant to rides in Boston. Lyft ride samples from other states are needed to identify the statistically significant predictors more accurately for fare price in the US.
+
+## Reference
+[1] Mazareanu, E. “U.S. Ride-Hailing Market Share 2020.” Statista, 22 Oct. 2020, www.statista.com/statistics/910704/market-share-of-rideshare-companies-united-states/.  
+<br />
+[2] “Lyft Fare Estimates - How Much Does Lyft Cost.” HyreCar, 16 July 2020, www.hyrecar.com/blog/lyft-fare-estimates/  
+<br />
+[3] Bm. “Uber and Lyft Dataset Boston, MA.” Kaggle, 13 Oct. 2019, www.kaggle.com/brllrb/uber-and-lyft-dataset-boston-ma.  
+
+## Appendix
+
+```{r, results='asis',echo=FALSE,warning=FALSE,message=FALSE,error=FALSE}
+options(xtable.comment = FALSE)
+model_final <- lm(formula = logprice ~ name + distance_cent + sm + destination + 
+                   rush + name:distance_cent + distance_cent:destination + distance_cent:sm + 
+                   name:rush + sm:rush + sm:destination, data = sample)
+print(xtable(summary(model_final)))
+```
+<br />  
+
+| **Variables** |	**Explanation** |
+| ------ | ------ | 
+| Rush |	‘N’: Non-Rush, ‘Y': Rush|
+| Destination |	1: West End, 2: Back Bay, 3: Beacon Hill, 4: Boston University, 5: Fenway, 6: Financial District, 7: Haymarket Square, 8: North End, 9: North Station, 10: Northeastern University, 11: South Station, 12: Theatre District|
+| Ride Type| 1: Lux (matched with a high-end sedan or SUV that seats 3. The vehicle will have leather or leather-like seats.), 2: Lux Black (Ultra high-end sedan or SUV that seats 3. The vehicle will have a black exterior and leather or leather-like seats.), 3: Lux Black XL (Spacious, ultra high-end SUV that seats 5. The vehicle will have a black exterior and leather or leather-like seats.), 4: Lyft (Standard Lyft car for up to 3 riders), 5: Lyft XL (SUV for up to 5+ riders), 6: Shared (Share a car with riders headed in the same direction at a discounted price.)|
+| Price |	Price of the ride in dollars|
+| Distance |	Distance traveled in miles |
+| Temperature |	Temperature in Fahrenheit |
+| Apparent Temperature |	Apparent temperature in Fahrenheit |
+| Wind Speed |	Wind speed in miles per hour|
+| Wind Gust |	Wind gust in miles per hour|
+| Icon | 1: clear-day, 2: clear-night, 3: cloudy, 4: fog, 5: partly-cloudy-day, 6: partly-cloudy-night, 7: rain|
+
+ 
+
+
+
+
+
+
+
+
+
